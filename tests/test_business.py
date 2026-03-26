@@ -63,6 +63,38 @@ def test_all_day_events_are_mapped_per_day() -> None:
     assert [item.row for item in layout.all_day_events] == [0, 0]
 
 
+def test_full_day_event_without_all_day_flag_is_treated_as_all_day() -> None:
+    week_start = datetime(2026, 4, 20, 0, 0)
+    event = CalendarEvent(
+        identifier="5",
+        title="Hausmuell",
+        start=datetime(2026, 4, 23, 0, 0),
+        end=datetime(2026, 4, 23, 23, 59),
+        is_all_day=False,
+    )
+
+    layout = layout_week_events([event], week_start)
+
+    assert len(layout.timed_events) == 0
+    assert [item.day_index for item in layout.all_day_events] == [3]
+
+
+def test_multi_day_full_day_event_without_all_day_flag_is_treated_as_all_day() -> None:
+    week_start = datetime(2026, 4, 20, 0, 0)
+    event = CalendarEvent(
+        identifier="6",
+        title="Containerdienst",
+        start=datetime(2026, 4, 22, 0, 0),
+        end=datetime(2026, 4, 24, 23, 59),
+        is_all_day=False,
+    )
+
+    layout = layout_week_events([event], week_start)
+
+    assert len(layout.timed_events) == 0
+    assert [item.day_index for item in layout.all_day_events] == [2, 3, 4]
+
+
 def test_navigation_to_next_week_returns_events() -> None:
     week_start1 = datetime(2026, 3, 23, 0, 0)
     week_start2 = week_start1 + timedelta(days=7)

@@ -47,7 +47,7 @@ def layout_week_events(
             if segment_end <= segment_start:
                 continue
 
-            if event.is_all_day:
+            if _is_effective_all_day(event):
                 row = all_day_rows[day_index]
                 all_day_layouts.append(AllDayEventLayout(event=event, day_index=day_index, row=row))
                 all_day_rows[day_index] += 1
@@ -135,3 +135,23 @@ def _layout_day_segments(
 
 def _minutes_since_midnight(value: datetime) -> int:
     return value.hour * 60 + value.minute
+
+
+def _is_effective_all_day(event: CalendarEvent) -> bool:
+    if event.is_all_day:
+        return True
+
+    start = event.start
+    end = event.end
+    if end <= start:
+        return False
+
+    starts_at_midnight = start.time() == time.min
+    ends_at_midnight = end.time() == time.min
+    ends_at_last_minute = end.time().hour == 23 and end.time().minute >= 59
+    spans_full_day = (end - start) >= timedelta(hours=23, minutes=59)
+
+    if starts_at_midnight and spans_full_day and (ends_at_midnight or ends_at_last_minute):
+        return True
+
+    return False
