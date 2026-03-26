@@ -168,18 +168,34 @@ def test_todo_and_calendar_highlight_sync(qapp) -> None:
 
 def test_todo_table_category_cell_uses_combobox(qapp) -> None:
     table = TodoTableWidget()
-    table.set_todos([TodoItem(title="Alpha", effort_hours=2.0, category="Fokus")])
+    table.set_todos(
+        [
+            TodoItem(title="Alpha", effort_hours=2.0, category="Projekt"),
+            TodoItem(title="Beta", effort_hours=1.5, category="Errands"),
+        ]
+    )
     table.show()
     qapp.processEvents()
 
     combo = table.cellWidget(0, 2)
     assert isinstance(combo, QComboBox)
-    assert combo.currentText() == "Fokus"
+    assert combo.currentText() == "Projekt"
 
-    combo.setCurrentText("Admin")
+    options = [combo.itemText(i) for i in range(combo.count())]
+    assert "Projekt" in options
+    assert "Errands" in options
+    assert "Fokus" not in options
+    assert "Admin" not in options
+
+    combo.setCurrentText("NeueKategorie")
     qapp.processEvents()
     todos = table.current_todos()
-    assert todos[0].category == "Admin"
+    assert todos[0].category == "NeueKategorie"
+
+    second_combo = table.cellWidget(1, 2)
+    assert isinstance(second_combo, QComboBox)
+    second_options = [second_combo.itemText(i) for i in range(second_combo.count())]
+    assert "NeueKategorie" in second_options
 
     table.close()
 
@@ -197,5 +213,24 @@ def test_todo_table_new_todo_defaults_to_one_hour(qapp) -> None:
     assert len(todos) == 1
     assert todos[0].title == "Neues Thema"
     assert todos[0].effort_hours == 1.0
+
+    table.close()
+
+
+def test_todo_table_placeholder_preselects_existing_category(qapp) -> None:
+    table = TodoTableWidget()
+    table.set_todos(
+        [
+            TodoItem(title="Alpha", effort_hours=1.0, category="Projekt"),
+            TodoItem(title="Beta", effort_hours=1.0, category="Haushalt"),
+        ]
+    )
+    table.show()
+    qapp.processEvents()
+
+    placeholder_row = table.rowCount() - 1
+    combo = table.cellWidget(placeholder_row, 2)
+    assert isinstance(combo, QComboBox)
+    assert combo.currentText() == "Haushalt"
 
     table.close()

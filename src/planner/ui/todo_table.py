@@ -18,16 +18,19 @@ class TodoTableWidget(QTableWidget):
     _PLACEHOLDER_CATEGORY = "Kategorie"
     MIME_TYPE = "application/x-planner-todo-row"
     LINK_ROLE = Qt.UserRole + 1
+    DEFAULT_CATEGORY_ROLE = Qt.UserRole + 2
 
     def __init__(self, parent=None) -> None:
         super().__init__(0, 3, parent)
         self._loading = False
-        self._category_options = ["", "Fokus", "Arbeit", "Admin", "Privat"]
+        self._category_options = [""]
         self.setHorizontalHeaderLabels(["Titel", "Zeitaufwand [h]", "Kategorie"])
         self.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
+        self.setColumnWidth(2, 180)
         self.verticalHeader().setVisible(False)
+        self.verticalHeader().setDefaultSectionSize(34)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setSelectionMode(QAbstractItemView.SingleSelection)
         self.setDragDropMode(QAbstractItemView.DragDrop)
@@ -61,6 +64,7 @@ class TodoTableWidget(QTableWidget):
             for todo in todos:
                 self._append_data_row(todo.title, _format_effort(todo.effort_hours), todo.category, todo.link)
             self._append_placeholder_row()
+            self._refresh_category_options()
         finally:
             self._loading = False
 
@@ -197,7 +201,8 @@ class TodoTableWidget(QTableWidget):
                     effort = ""
             category_item = self.item(row, 2)
             if category_item is not None and category_item.data(Qt.UserRole):
-                if category == self._PLACEHOLDER_CATEGORY:
+                default_category = str(category_item.data(self.DEFAULT_CATEGORY_ROLE) or "").strip()
+                if category == self._PLACEHOLDER_CATEGORY or category == default_category:
                     category = ""
 
             if title or effort or category:
@@ -261,6 +266,7 @@ class TodoTableWidget(QTableWidget):
         return row
 
     def _emit_change(self) -> None:
+        self._refresh_category_options()
         self.todosChanged.emit(self.current_todos())
         self._emit_selected_todo()
 
@@ -354,21 +360,20 @@ class TodoTableWidget(QTableWidget):
         if placeholder:
             item.setForeground(QColor("#94a3b8"))
             item.setData(Qt.UserRole, True)
+            item.setData(self.DEFAULT_CATEGORY_ROLE, self._default_placeholder_category())
             item.setFlags((item.flags() | Qt.ItemIsDropEnabled) & ~Qt.ItemIsDragEnabled)
         else:
             item.setForeground(QColor("#0f172a"))
             item.setData(Qt.UserRole, None)
+            item.setData(self.DEFAULT_CATEGORY_ROLE, "")
         self.setItem(row, 2, item)
 
         combo = QComboBox(self)
         combo.setEditable(True)
         combo.setInsertPolicy(QComboBox.NoInsert)
-        options = list(self._category_options)
-        if category and category not in options:
-            options.append(category)
-        combo.addItems(options)
+        combo.addItems(self._combo_options(category))
         if placeholder:
-            combo.setCurrentText("")
+            combo.setCurrentText(self._default_placeholder_category())
             combo.lineEdit().setPlaceholderText(self._PLACEHOLDER_CATEGORY)
         else:
             combo.setCurrentText(category)
@@ -421,14 +426,123 @@ class TodoTableWidget(QTableWidget):
     def _configure_category_combo_style(self, combo: QComboBox, placeholder: bool) -> None:
         if placeholder:
             combo.setStyleSheet(
-                "QComboBox { color: #94a3b8; border: none; padding: 0 6px; background: transparent; }"
-                "QComboBox::drop-down { border: none; width: 18px; }"
+                "QComboBox {"
+                "color: #94a3b8;"
+                "border: 1px solid #dbe4ef;"
+                "border-radius: 8px;"
+                "padding: 3px 28px 3px 8px;"
+                "background: #f8fafc;"
+                "selection-background-color: #e2e8f0;"
+                "}"
+                "QComboBox::drop-down {"
+                "subcontrol-origin: padding;"
+                "subcontrol-position: top right;"
+                "width: 24px;"
+                "border: none;"
+                "}"
+                "QComboBox::down-arrow { image: none; width: 0; height: 0; }"
+                "QComboBox QAbstractItemView {"
+                "border: 1px solid #dbe4ef;"
+                "background: white;"
+                "selection-background-color: #dbeafe;"
+                "selection-color: #0f172a;"
+                "}"
+                "QComboBox QLineEdit {"
+                "color: #94a3b8;"
+                "background: transparent;"
+                "border: none;"
+                "padding: 0;"
+                "}"
             )
             return
         combo.setStyleSheet(
-            "QComboBox { color: #0f172a; border: none; padding: 0 6px; background: transparent; }"
-            "QComboBox::drop-down { border: none; width: 18px; }"
+            "QComboBox {"
+            "color: #0f172a;"
+            "border: 1px solid #cbd5e1;"
+            "border-radius: 8px;"
+            "padding: 3px 28px 3px 8px;"
+            "background: white;"
+            "selection-background-color: #dbeafe;"
+            "}"
+            "QComboBox:hover { border-color: #94a3b8; }"
+            "QComboBox:focus { border-color: #3b82f6; }"
+            "QComboBox::drop-down {"
+            "subcontrol-origin: padding;"
+            "subcontrol-position: top right;"
+            "width: 24px;"
+            "border: none;"
+            "}"
+            "QComboBox::down-arrow { image: none; width: 0; height: 0; }"
+            "QComboBox QAbstractItemView {"
+            "border: 1px solid #cbd5e1;"
+            "background: white;"
+            "selection-background-color: #dbeafe;"
+            "selection-color: #0f172a;"
+            "}"
+            "QComboBox QLineEdit {"
+            "color: #0f172a;"
+            "background: transparent;"
+            "border: none;"
+            "padding: 0;"
+            "}"
         )
+
+    def _collect_used_categories(self) -> list[str]:
+        categories: list[str] = []
+        for row in range(max(0, self.rowCount() - 1)):
+            category = self._category_text(row).strip()
+            if not category:
+                continue
+            if category not in categories:
+                categories.append(category)
+        return categories
+
+    def _combo_options(self, current_value: str = "") -> list[str]:
+        options = list(self._category_options)
+        normalized = current_value.strip()
+        if normalized and normalized not in options:
+            options.append(normalized)
+        return options
+
+    def _refresh_category_options(self) -> None:
+        used = self._collect_used_categories()
+        self._category_options = [""] + used
+
+        for row in range(self.rowCount()):
+            combo = self._category_combo(row)
+            if combo is None:
+                continue
+            current_text = combo.currentText().strip()
+            placeholder_item = self.item(row, 2)
+            is_placeholder = bool(placeholder_item and placeholder_item.data(Qt.UserRole))
+            options = self._combo_options(current_text)
+            previous_default = str(placeholder_item.data(self.DEFAULT_CATEGORY_ROLE) or "").strip() if placeholder_item else ""
+
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(options)
+            if is_placeholder:
+                default_category = self._default_placeholder_category()
+                item = self.item(row, 2)
+                if item is not None:
+                    item.setData(self.DEFAULT_CATEGORY_ROLE, default_category)
+                target_text = current_text
+                if not target_text or target_text == previous_default:
+                    target_text = default_category
+                combo.setCurrentText(target_text)
+            else:
+                combo.setCurrentText(current_text)
+            combo.blockSignals(False)
+
+            if is_placeholder and not current_text:
+                combo.lineEdit().setPlaceholderText(self._PLACEHOLDER_CATEGORY)
+
+    def _default_placeholder_category(self) -> str:
+        for row in range(self.rowCount() - 2, -1, -1):
+            category = self._category_text(row).strip()
+            if category:
+                return category
+        return ""
 
     def _apply_title_style(self, title_item: QTableWidgetItem) -> None:
         if title_item.data(Qt.UserRole):
