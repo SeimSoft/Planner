@@ -7,12 +7,14 @@ from PySide6.QtGui import QDesktopServices, QDrag
 from PySide6.QtWidgets import QAbstractItemView, QComboBox, QHeaderView, QInputDialog, QMenu, QTableWidget, QTableWidgetItem
 
 from planner.todos import TodoItem, todo_key
+from planner.ui.category_colors import category_light_color
 
 
 class TodoTableWidget(QTableWidget):
     todosChanged = Signal(list)
     dragActiveChanged = Signal(bool)
     todoSelected = Signal(str)
+    todoArchiveRequested = Signal(str)
     _PLACEHOLDER_TITLE = "Neues Todo"
     _PLACEHOLDER_EFFORT = "1"
     _PLACEHOLDER_CATEGORY = "Kategorie"
@@ -24,11 +26,13 @@ class TodoTableWidget(QTableWidget):
         super().__init__(0, 3, parent)
         self._loading = False
         self._category_options = [""]
-        self.setHorizontalHeaderLabels(["Titel", "Zeitaufwand [h]", "Kategorie"])
+        self.setHorizontalHeaderLabels(["Titel", "h", "Kategorie"])
         self.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
         self.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
-        self.setColumnWidth(2, 180)
+        self.setColumnWidth(1, 56)
+        self.setColumnWidth(2, 130)
+        self.horizontalHeaderItem(1).setToolTip("Zeitaufwand in Stunden")
         self.verticalHeader().setVisible(False)
         self.verticalHeader().setDefaultSectionSize(34)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -51,6 +55,7 @@ class TodoTableWidget(QTableWidget):
             "QTableWidget { background: white; border: 1px solid #dbe4ef; border-radius: 12px; }"
             "QHeaderView::section { background: #eef2f7; color: #334155; font-weight: 700; border: none; padding: 8px; }"
             "QTableWidget::item { padding: 6px; }"
+            "QToolTip { background: #f8fafc; color: #0f172a; border: 1px solid #cbd5e1; padding: 6px; }"
         )
         self.cellChanged.connect(self._handle_cell_changed)
         self.customContextMenuRequested.connect(self._open_context_menu)
@@ -113,6 +118,29 @@ class TodoTableWidget(QTableWidget):
                 self._emit_selected_todo()
                 return todo
         return None
+
+    def edit_link_for_todo_key(self, key: str) -> bool:
+        row = self._row_for_todo_key(key)
+        if row is None:
+            return False
+        self.selectRow(row)
+        self._edit_link_for_row(row)
+        return True
+
+    def open_link_for_todo_key(self, key: str) -> bool:
+        row = self._row_for_todo_key(key)
+        if row is None:
+            return False
+
+        title_item = self.item(row, 0)
+        if title_item is None:
+            return False
+
+        link = _clean_link(title_item.data(self.LINK_ROLE))
+        if not link:
+            return False
+        QDesktopServices.openUrl(QUrl(link))
+        return True
 
     def select_todo_by_key(self, key: str) -> None:
         normalized = key.strip().lower()
@@ -279,23 +307,34 @@ class TodoTableWidget(QTableWidget):
         self.setItem(row_index, 0, title_item)
         self.setItem(row_index, 1, _make_item(effort))
         self._set_category_cell(row_index, category, placeholder=False)
+        self._apply_row_category_color(row_index, category)
 
     def _open_context_menu(self, position) -> None:
         row = self.rowAt(position.y())
         if row < 0 or row >= self.rowCount() - 1:
             return
 
+        todo = self.todo_for_row(row)
         title_item = self.item(row, 0)
-        if title_item is None:
+        if title_item is None or todo is None:
             return
 
         link = _clean_link(title_item.data(self.LINK_ROLE))
         menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background: #f8fafc; color: #0f172a; border: 1px solid #cbd5e1; }"
+            "QMenu::item { padding: 6px 16px; }"
+            "QMenu::item:selected { background: #e2e8f0; color: #0f172a; }"
+        )
+        archive_action = menu.addAction("Done/Archive")
+        menu.addSeparator()
         edit_action = menu.addAction("Edit Link")
         open_action = menu.addAction("Open Link")
         open_action.setEnabled(bool(link))
 
         selected = menu.exec(self.viewport().mapToGlobal(position))
+        if selected is archive_action:
+            self.todoArchiveRequested.emit(todo_key(todo.title, todo.category))
         if selected is edit_action:
             self._edit_link_for_row(row)
         if selected is open_action and link:
@@ -315,6 +354,14 @@ class TodoTableWidget(QTableWidget):
         title_item.setData(self.LINK_ROLE, link)
         self._apply_title_style(title_item)
         self._emit_change()
+
+    def _row_for_todo_key(self, key: str) -> int | None:
+        normalized = key.strip().lower()
+        for row_index in range(max(0, self.rowCount() - 1)):
+            todo = self.todo_for_row(row_index)
+            if todo and todo_key(todo.title, todo.category) == normalized:
+                return row_index
+        return None
 
     def _append_placeholder_row(self) -> None:
         row_index = self.rowCount()
@@ -421,9 +468,34 @@ class TodoTableWidget(QTableWidget):
 
         if not is_placeholder_row:
             self._configure_category_combo_style(combo, placeholder=False)
+            self._apply_row_category_color(row, category_text)
             self._emit_change()
 
-    def _configure_category_combo_style(self, combo: QComboBox, placeholder: bool) -> None:
+    def _apply_row_category_color(self, row: int, category: str) -> None:
+        if row < 0 or row >= self.rowCount():
+            return
+        shade = category_light_color(category).name() if category.strip() else "#ffffff"
+
+        for column in range(self.columnCount()):
+            item = self.item(row, column)
+            if item is not None and not item.data(Qt.UserRole):
+                item.setBackground(QColor(shade))
+
+        combo = self._category_combo(row)
+        if combo is not None:
+            self._configure_category_combo_style(combo, placeholder=False)
+            combo.setStyleSheet(
+                combo.styleSheet()
+                + (
+                    "QComboBox { background: "
+                    + shade
+                    + "; }"
+                    "QComboBox QLineEdit { background: transparent; }"
+                )
+            )
+
+    def _configure_category_combo_style(self, combo: QComboBox, placeholder: bool, background: str | None = None) -> None:
+        bg = background or ("#f8fafc" if placeholder else "white")
         if placeholder:
             combo.setStyleSheet(
                 "QComboBox {"
@@ -431,7 +503,7 @@ class TodoTableWidget(QTableWidget):
                 "border: 1px solid #dbe4ef;"
                 "border-radius: 8px;"
                 "padding: 3px 28px 3px 8px;"
-                "background: #f8fafc;"
+                f"background: {bg};"
                 "selection-background-color: #e2e8f0;"
                 "}"
                 "QComboBox::drop-down {"
@@ -461,7 +533,7 @@ class TodoTableWidget(QTableWidget):
             "border: 1px solid #cbd5e1;"
             "border-radius: 8px;"
             "padding: 3px 28px 3px 8px;"
-            "background: white;"
+            f"background: {bg};"
             "selection-background-color: #dbeafe;"
             "}"
             "QComboBox:hover { border-color: #94a3b8; }"
@@ -512,11 +584,13 @@ class TodoTableWidget(QTableWidget):
             combo = self._category_combo(row)
             if combo is None:
                 continue
+
             current_text = combo.currentText().strip()
             placeholder_item = self.item(row, 2)
             is_placeholder = bool(placeholder_item and placeholder_item.data(Qt.UserRole))
             options = self._combo_options(current_text)
             previous_default = str(placeholder_item.data(self.DEFAULT_CATEGORY_ROLE) or "").strip() if placeholder_item else ""
+            shade = category_light_color(current_text).name() if current_text else "#ffffff"
 
             combo.blockSignals(True)
             combo.clear()
@@ -532,6 +606,7 @@ class TodoTableWidget(QTableWidget):
                 combo.setCurrentText(target_text)
             else:
                 combo.setCurrentText(current_text)
+                self._configure_category_combo_style(combo, placeholder=False, background=shade)
             combo.blockSignals(False)
 
             if is_placeholder and not current_text:

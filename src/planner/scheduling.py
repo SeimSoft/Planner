@@ -103,9 +103,11 @@ class ScheduleStore:
 
 
 def schedule_todos(todos: list[TodoItem], free_slots: tuple[FreeSlot, ...]) -> SchedulingResult:
+    min_slot_minutes = 30
     working_slots = [
         [slot.day_index, slot.start_minutes, slot.end_minutes]
         for slot in sorted(free_slots, key=lambda item: (item.day_index, item.start_minutes))
+        if (slot.end_minutes - slot.start_minutes) >= min_slot_minutes
     ]
 
     scheduled_blocks: list[ScheduledTodoBlock] = []
@@ -123,7 +125,7 @@ def schedule_todos(todos: list[TodoItem], free_slots: tuple[FreeSlot, ...]) -> S
         while remaining_minutes > 0 and slot_index < len(working_slots):
             day_index, slot_start, slot_end = working_slots[slot_index]
             available = max(0, slot_end - slot_start)
-            if available <= 0:
+            if available < min_slot_minutes:
                 slot_index += 1
                 continue
 

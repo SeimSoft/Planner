@@ -7,12 +7,13 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGridLayout,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QTextEdit,
     QTimeEdit,
     QVBoxLayout,
     QWidget,
@@ -52,9 +53,46 @@ class SettingsDialog(QDialog):
         self._residence.setPlaceholderText("z. B. Berlin, Bayern oder NW")
         self._residence.setText(current.residence)
 
+        self._jira_base_url = QLineEdit(self)
+        self._jira_base_url.setPlaceholderText("z. B. https://jira.intra.XXXXXX.com")
+        self._jira_base_url.setText(current.jira_base_url)
+
+        self._jira_jql = QTextEdit(self)
+        self._jira_jql.setPlaceholderText("resolution = Unresolved AND assignee = currentUser() AND sprint in openSprints() order by updated DESC")
+        self._jira_jql.setPlainText(current.jira_jql)
+        self._jira_jql.setMinimumHeight(72)
+
+        self._jira_story_point_hours = QDoubleSpinBox(self)
+        self._jira_story_point_hours.setDecimals(2)
+        self._jira_story_point_hours.setRange(0.1, 100.0)
+        self._jira_story_point_hours.setSingleStep(0.5)
+        self._jira_story_point_hours.setSuffix(" h")
+        self._jira_story_point_hours.setValue(current.jira_story_point_hours)
+
+        self._jira_username = QLineEdit(self)
+        self._jira_username.setPlaceholderText("Jira Benutzername")
+        self._jira_username.setText(current.jira_username)
+
+        self._jira_password = QLineEdit(self)
+        self._jira_password.setPlaceholderText("Jira Passwort")
+        self._jira_password.setText(current.jira_password)
+        self._jira_password.setEchoMode(QLineEdit.Password)
+
         form.addRow("Arbeitszeit Start", self._start)
         form.addRow("Arbeitszeit Ende", self._end)
         form.addRow("Wohnort", self._residence)
+
+        form.addRow("", QLabel(""))  # Spacer
+
+        jira_label = QLabel("Jira Integration")
+        jira_label.setStyleSheet("font-weight: 600; color: #0f172a;")
+        form.addRow(jira_label, None)
+
+        form.addRow("Jira Base URL", self._jira_base_url)
+        form.addRow("JQL", self._jira_jql)
+        form.addRow("Story Point -> h", self._jira_story_point_hours)
+        form.addRow("Jira Benutzername", self._jira_username)
+        form.addRow("Jira Passwort", self._jira_password)
 
         day_container = QWidget(self)
         day_layout = QGridLayout(day_container)
@@ -120,6 +158,12 @@ class SettingsDialog(QDialog):
             work_end=time(hour=end.hour(), minute=end.minute()),
             workdays=workdays,
             residence=self._residence.text().strip(),
+            show_weekends=self._result.show_weekends,
+            jira_base_url=self._jira_base_url.text().strip(),
+            jira_jql=self._jira_jql.toPlainText().strip(),
+            jira_story_point_hours=float(self._jira_story_point_hours.value()),
+            jira_username=self._jira_username.text().strip(),
+            jira_password=self._jira_password.text().strip(),
         )
         self.accept()
 

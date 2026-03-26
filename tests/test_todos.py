@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from planner.todo_details import TodoDetailsStore
 from planner.todos import TodoArchiveStore, TodoItem, TodoStore
 
 
@@ -59,3 +60,43 @@ def test_todo_archive_store_writes_markdown(tmp_path: Path) -> None:
     assert "| Geloescht am | Titel | Zeitaufwand [h] | Kategorie | Link |" in content
     assert "Erledigt" in content
     assert "Admin" in content
+
+
+def test_todo_details_store_creates_markdown_and_metadata(tmp_path: Path) -> None:
+    store = TodoDetailsStore(tmp_path / "planner_data" / "todos")
+    todo = TodoItem(title="ANAGEN-2993: Test", effort_hours=3.0, category="jira", link="https://example.com")
+
+    details = store.ensure(todo, initial_description="Summary text")
+
+    assert details.todo_dir.exists()
+    assert details.description_path.exists()
+    assert details.attachments_dir.exists()
+    assert store.load_description(todo) == "Summary text\n"
+    assert (details.todo_dir / "meta.json").exists()
+
+
+def test_todo_details_store_adds_unique_attachments(tmp_path: Path) -> None:
+    store = TodoDetailsStore(tmp_path / "planner_data" / "todos")
+    todo = TodoItem(title="Attachment Todo", effort_hours=1.0, category="ops")
+    source = tmp_path / "note.txt"
+    source.write_text("v1", encoding="utf-8")
+
+    first = store.add_attachment(todo, source)
+    second = store.add_attachment(todo, source)
+
+    assert first.exists()
+    assert second.exists()
+    assert first.name == "note.txt"
+    assert second.name == "note_2.txt"
+
+
+def test_todo_details_store_fills_empty_existing_description(tmp_path: Path) -> None:
+    store = TodoDetailsStore(tmp_path / "planner_data" / "todos")
+    todo = TodoItem(title="ANAGEN-2993: Summary", effort_hours=1.0, category="jira")
+
+    details = store.ensure(todo)
+    details.description_path.write_text("\n\n", encoding="utf-8")
+
+    store.ensure(todo, initial_description="Filled from jira")
+
+    assert store.load_description(todo) == "Filled from jira\n"

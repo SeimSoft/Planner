@@ -6,16 +6,17 @@ from datetime import datetime, timedelta
 
 from PySide6.QtCore import QMimeData, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QDrag, QFont, QPainter, QPaintEvent, QPen
-from PySide6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QLabel, QMenu, QScrollArea, QVBoxLayout, QWidget
 
 from planner.models import AllDayEventLayout, TimedEventLayout, WeekLayout
 from planner.productivity import FreeSlot
 from planner.scheduling import ScheduledTodoBlock
+from planner.ui.category_colors import category_color, contrast_text_color
 
 
 DAY_NAMES = ("Mo", "Di", "Mi", "Do", "Fr", "Sa", "So")
 TIME_GUTTER = 68
-HOUR_HEIGHT = 72
+HOUR_HEIGHT = 96
 ALL_DAY_ROW_HEIGHT = 28
 DAY_PADDING = 6
 EVENT_PALETTE = ("#dc6b52", "#e5a93d", "#4c9f70", "#3282b8", "#2260c7", "#7c6cc9", "#c95d7b")
@@ -24,12 +25,15 @@ EVENT_PALETTE = ("#dc6b52", "#e5a93d", "#4c9f70", "#3282b8", "#2260c7", "#7c6cc9
 class WeekView(QWidget):
     todoSelected = Signal(str)
     todoArchiveRequested = Signal(str)
+    todoEditLinkRequested = Signal(str)
+    todoOpenLinkRequested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._layout: WeekLayout | None = None
         self._free_slots: tuple[FreeSlot, ...] = ()
         self._scheduled_todos: tuple[ScheduledTodoBlock, ...] = ()
+        self._show_weekends = True
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -39,6 +43,9 @@ class WeekView(QWidget):
         self._all_day = _AllDayWidget(self)
         self._canvas = _TimedCanvas(self)
         self._canvas.todoSelected.connect(self.todoSelected)
+        self._canvas.todoArchiveRequested.connect(self.todoArchiveRequested)
+        self._canvas.todoEditLinkRequested.connect(self.todoEditLinkRequested)
+        self._canvas.todoOpenLinkRequested.connect(self.todoOpenLinkRequested)
         self._canvas.archiveDragActiveChanged.connect(self._set_archive_zone_visible)
 
         scroll = QScrollArea(self)
@@ -56,6 +63,19 @@ class WeekView(QWidget):
         self._archive_zone.todoDropped.connect(self.todoArchiveRequested)
         self._archive_zone.todoDropped.connect(lambda _key: self._set_archive_zone_visible(False))
         self._archive_zone.hide()
+
+    def set_show_weekends(self, show_weekends: bool) -> None:
+        self._show_weekends = bool(show_weekends)
+        self._header.set_show_weekends(self._show_weekends)
+        self._all_day.set_show_weekends(self._show_weekends)
+        self._canvas.set_show_weekends(self._show_weekends)
+
+        if self._layout is not None:
+            self._header.set_week(self._layout)
+            self._all_day.set_week(self._layout)
+            self._canvas.set_week(self._layout)
+        self._canvas.set_free_slots(self._free_slots)
+        self._canvas.set_scheduled_todos(self._scheduled_todos)
 
     def set_week(self, week_layout: WeekLayout) -> None:
         self._layout = week_layout
@@ -101,7 +121,12 @@ class _HeaderWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._layout: WeekLayout | None = None
+        self._show_weekends = True
         self.setMinimumHeight(74)
+
+    def set_show_weekends(self, show_weekends: bool) -> None:
+        self._show_weekends = bool(show_weekends)
+        self.update()
 
     def set_week(self, week_layout: WeekLayout) -> None:
         self._layout = week_layout
@@ -116,13 +141,16 @@ class _HeaderWidget(QWidget):
         if self._layout is None:
             return
 
-        day_width = (self.width() - TIME_GUTTER) / 7
+        visible_days = _visible_day_indices(self._show_weekends)
+        day_count = max(1, len(visible_days))
+        day_width = (self.width() - TIME_GUTTER) / day_count
         painter.fillRect(QRect(0, 0, TIME_GUTTER, self.height()), QColor("#f5f7fb"))
         painter.setPen(QColor("#64748b"))
         painter.drawText(QRect(0, 18, TIME_GUTTER - 8, 20), Qt.AlignRight | Qt.AlignVCenter, "Ganztag")
 
-        for day_index, day_name in enumerate(DAY_NAMES):
-            x = int(TIME_GUTTER + day_index * day_width)
+        for column_index, day_index in enumerate(visible_days):
+            day_name = DAY_NAMES[day_index]
+            x = int(TIME_GUTTER + column_index * day_width)
             rect = QRect(x, 0, int(day_width), self.height())
             date_value = self._layout.week_start + timedelta(days=day_index)
             status = _day_status(self._layout, day_index)
@@ -158,16 +186,26 @@ class _AllDayWidget(QWidget):
         super().__init__(parent)
         self._layout: WeekLayout | None = None
         self._chips: list[QLabel] = []
+        self._chip_layouts: list[AllDayEventLayout] = []
+        self._show_weekends = True
         self.setMinimumHeight(42)
+
+    def set_show_weekends(self, show_weekends: bool) -> None:
+        self._show_weekends = bool(show_weekends)
+        self._place_chips()
+        self.update()
 
     def set_week(self, week_layout: WeekLayout) -> None:
         self._layout = week_layout
         for chip in self._chips:
             chip.deleteLater()
         self._chips.clear()
+        self._chip_layouts.clear()
 
         grouped: dict[int, list[AllDayEventLayout]] = defaultdict(list)
         for event_layout in week_layout.all_day_events:
+            if _day_column(event_layout.day_index, self._show_weekends) is None:
+                continue
             grouped[event_layout.day_index].append(event_layout)
 
         max_rows = 0
@@ -177,13 +215,19 @@ class _AllDayWidget(QWidget):
                 chip = QLabel(event_layout.event.title, self)
                 chip.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
                 chip.setMargin(6)
+                chip_bg = _event_color(event_layout.event.calendar_name or event_layout.event.title)
+                chip_text = "white"
+                if _is_soft_event(event_layout.event):
+                    chip_bg = _soft_event_color(chip_bg)
+                    chip_text = "#334155"
                 chip.setStyleSheet(
-                    "background: {color}; color: white; border-radius: 8px; font-weight: 600;"
-                    .format(color=_event_color(event_layout.event.calendar_name or event_layout.event.title))
+                    "background: {color}; color: {text_color}; border-radius: 8px; font-weight: 600;"
+                    .format(color=chip_bg, text_color=chip_text)
                 )
                 chip.setToolTip(_tooltip_text(event_layout.event))
                 chip.show()
                 self._chips.append(chip)
+                self._chip_layouts.append(event_layout)
 
         self.setFixedHeight(max(42, 12 + max_rows * (ALL_DAY_ROW_HEIGHT + 4)))
         self._place_chips()
@@ -201,10 +245,12 @@ class _AllDayWidget(QWidget):
         painter.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
         if self._layout is None:
             return
-        day_width = (self.width() - TIME_GUTTER) / 7
+        visible_days = _visible_day_indices(self._show_weekends)
+        day_count = max(1, len(visible_days))
+        day_width = (self.width() - TIME_GUTTER) / day_count
         painter.fillRect(QRect(0, 0, TIME_GUTTER, self.height()), QColor("#f5f7fb"))
-        for day_index in range(7):
-            x = int(TIME_GUTTER + day_index * day_width)
+        for column_index, day_index in enumerate(visible_days):
+            x = int(TIME_GUTTER + column_index * day_width)
             status = _day_status(self._layout, day_index)
             is_today = _is_today_column(self._layout, day_index)
             painter.fillRect(
@@ -225,15 +271,25 @@ class _AllDayWidget(QWidget):
     def _place_chips(self) -> None:
         if self._layout is None:
             return
-        day_width = (self.width() - TIME_GUTTER) / 7
-        for chip, event_layout in zip(self._chips, self._layout.all_day_events):
-            x = int(TIME_GUTTER + event_layout.day_index * day_width + DAY_PADDING)
+        visible_days = _visible_day_indices(self._show_weekends)
+        day_count = max(1, len(visible_days))
+        day_width = (self.width() - TIME_GUTTER) / day_count
+        for chip, event_layout in zip(self._chips, self._chip_layouts):
+            column_index = _day_column(event_layout.day_index, self._show_weekends)
+            if column_index is None:
+                chip.hide()
+                continue
+            x = int(TIME_GUTTER + column_index * day_width + DAY_PADDING)
             y = 8 + event_layout.row * (ALL_DAY_ROW_HEIGHT + 4)
             chip.setGeometry(x, y, int(day_width - DAY_PADDING * 2), ALL_DAY_ROW_HEIGHT)
+            chip.show()
 
 
 class _TimedCanvas(QWidget):
     todoSelected = Signal(str)
+    todoArchiveRequested = Signal(str)
+    todoEditLinkRequested = Signal(str)
+    todoOpenLinkRequested = Signal(str)
     archiveDragActiveChanged = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -244,8 +300,14 @@ class _TimedCanvas(QWidget):
         self._cards: list[_EventCard] = []
         self._todo_cards: list[_ScheduledTodoCard] = []
         self._highlighted_todo_key: str = ""
+        self._show_weekends = True
         self.setMinimumHeight(HOUR_HEIGHT * 24)
         self._empty_message: QLabel | None = None
+
+    def set_show_weekends(self, show_weekends: bool) -> None:
+        self._show_weekends = bool(show_weekends)
+        self._position_cards()
+        self.update()
 
     def set_week(self, week_layout: WeekLayout) -> None:
         self.archiveDragActiveChanged.emit(False)
@@ -258,6 +320,8 @@ class _TimedCanvas(QWidget):
         self._todo_cards.clear()
 
         for event_layout in week_layout.timed_events:
+            if _day_column(event_layout.day_index, self._show_weekends) is None:
+                continue
             card = _EventCard(event_layout, self)
             card.show()
             self._cards.append(card)
@@ -276,8 +340,13 @@ class _TimedCanvas(QWidget):
         self._todo_cards.clear()
 
         for block in scheduled_todos:
+            if _day_column(block.day_index, self._show_weekends) is None:
+                continue
             card = _ScheduledTodoCard(block, self)
             card.clicked.connect(self._on_todo_card_clicked)
+            card.archiveRequested.connect(self.todoArchiveRequested)
+            card.editLinkRequested.connect(self.todoEditLinkRequested)
+            card.openLinkRequested.connect(self.todoOpenLinkRequested)
             card.dragStateChanged.connect(self._on_todo_drag_state_changed)
             card.show()
             self._todo_cards.append(card)
@@ -300,12 +369,14 @@ class _TimedCanvas(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.fillRect(self.rect(), QColor("#fffdfc"))
 
-        day_width = (self.width() - TIME_GUTTER) / 7
+        visible_days = _visible_day_indices(self._show_weekends)
+        day_count = max(1, len(visible_days))
+        day_width = (self.width() - TIME_GUTTER) / day_count
         painter.fillRect(QRect(0, 0, TIME_GUTTER, self.height()), QColor("#f5f7fb"))
 
         if self._layout is not None:
-            for day_index in range(7):
-                x = int(TIME_GUTTER + day_index * day_width)
+            for column_index, day_index in enumerate(visible_days):
+                x = int(TIME_GUTTER + column_index * day_width)
                 status = _day_status(self._layout, day_index)
                 is_today = _is_today_column(self._layout, day_index)
                 painter.fillRect(
@@ -316,7 +387,10 @@ class _TimedCanvas(QWidget):
         if self._free_slots:
             painter.setPen(Qt.NoPen)
             for slot in self._free_slots:
-                x = TIME_GUTTER + slot.day_index * day_width + DAY_PADDING
+                column_index = _day_column(slot.day_index, self._show_weekends)
+                if column_index is None:
+                    continue
+                x = TIME_GUTTER + column_index * day_width + DAY_PADDING
                 y = slot.start_minutes * (HOUR_HEIGHT / 60)
                 width = max(day_width - DAY_PADDING * 2, 12)
                 height = max((slot.end_minutes - slot.start_minutes) * (HOUR_HEIGHT / 60), 8)
@@ -332,17 +406,18 @@ class _TimedCanvas(QWidget):
             painter.setPen(QPen(QColor("#e2e8f0"), 1))
             painter.drawLine(TIME_GUTTER, y, self.width(), y)
 
-        for day_index in range(8):
-            x = int(TIME_GUTTER + day_index * day_width)
+        for column_index in range(day_count + 1):
+            x = int(TIME_GUTTER + column_index * day_width)
             painter.setPen(QPen(QColor("#e2e8f0"), 1))
             painter.drawLine(x, 0, x, self.height())
 
         if self._layout is not None:
             today_index = _today_day_index(self._layout)
-            if today_index is not None:
+            today_column = _day_column(today_index, self._show_weekends) if today_index is not None else None
+            if today_column is not None:
                 now = datetime.now()
                 y = int((now.hour * 60 + now.minute) * (HOUR_HEIGHT / 60))
-                day_x = int(TIME_GUTTER + today_index * day_width)
+                day_x = int(TIME_GUTTER + today_column * day_width)
                 painter.setPen(QPen(QColor("#ef4444"), 2))
                 painter.drawLine(day_x, y, int(day_x + day_width), y)
                 painter.setBrush(QColor("#ef4444"))
@@ -352,25 +427,37 @@ class _TimedCanvas(QWidget):
     def _position_cards(self) -> None:
         if self._layout is None:
             return
-        day_width = (self.width() - TIME_GUTTER) / 7
+        visible_days = _visible_day_indices(self._show_weekends)
+        day_count = max(1, len(visible_days))
+        day_width = (self.width() - TIME_GUTTER) / day_count
         pixels_per_minute = HOUR_HEIGHT / 60
 
         for card in self._cards:
             event_layout = card.layout_data
+            column_index = _day_column(event_layout.day_index, self._show_weekends)
+            if column_index is None:
+                card.hide()
+                continue
             column_width = (day_width - DAY_PADDING * 2) / max(event_layout.column_count, 1)
-            x = TIME_GUTTER + event_layout.day_index * day_width + DAY_PADDING + event_layout.column * column_width
+            x = TIME_GUTTER + column_index * day_width + DAY_PADDING + event_layout.column * column_width
             y = event_layout.start_minutes * pixels_per_minute
-            height = max((event_layout.end_minutes - event_layout.start_minutes) * pixels_per_minute, 24)
+            height = max((event_layout.end_minutes - event_layout.start_minutes) * pixels_per_minute, 36)
             width = max(column_width - 4, 48)
             card.setGeometry(int(x), int(y + 1), int(width), int(height - 2))
+            card.show()
 
         for card in self._todo_cards:
             block = card.block
-            x = TIME_GUTTER + block.day_index * day_width + DAY_PADDING
+            column_index = _day_column(block.day_index, self._show_weekends)
+            if column_index is None:
+                card.hide()
+                continue
+            x = TIME_GUTTER + column_index * day_width + DAY_PADDING
             y = block.start_minutes * pixels_per_minute
-            height = max((block.end_minutes - block.start_minutes) * pixels_per_minute, 24)
+            height = max((block.end_minutes - block.start_minutes) * pixels_per_minute, 34)
             width = max(day_width - DAY_PADDING * 2 - 4, 48)
             card.setGeometry(int(x), int(y + 1), int(width), int(height - 2))
+            card.show()
 
     def _on_todo_card_clicked(self, todo_key: str) -> None:
         normalized = todo_key.strip().lower()
@@ -385,26 +472,38 @@ class _EventCard(QFrame):
     def __init__(self, layout_data: TimedEventLayout, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.layout_data = layout_data
+        self._hover_base_geometry: QRect | None = None
 
         color = _event_color(layout_data.event.calendar_name or layout_data.event.title)
+        text_color = "white"
+        time_color = "rgba(255, 255, 255, 0.92)"
+        border_color = "rgba(15, 23, 42, 0.08)"
+        if _is_soft_event(layout_data.event):
+            color = _soft_event_color(color)
+            text_color = "#334155"
+            time_color = "rgba(51, 65, 85, 0.88)"
+            border_color = "rgba(51, 65, 85, 0.20)"
+
         self.setStyleSheet(
             "QFrame {"
             f"background: {color};"
             "border-radius: 12px;"
-            "border: 1px solid rgba(15, 23, 42, 0.08);"
+            f"border: 1px solid {border_color};"
             "}"
-            "QLabel { color: white; background: transparent; }"
+            f"QLabel {{ color: {text_color}; background: transparent; }}"
         )
 
         title = QLabel(layout_data.event.title, self)
         title.setWordWrap(True)
         title.setStyleSheet("font-size: 13px; font-weight: 700;")
+        title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         time_label = QLabel(
             f"{layout_data.event.start:%H:%M} - {layout_data.event.end:%H:%M}",
             self,
         )
-        time_label.setStyleSheet("font-size: 11px; color: rgba(255, 255, 255, 0.92);")
+        time_label.setStyleSheet(f"font-size: 11px; color: {time_color};")
+        time_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         container = QVBoxLayout(self)
         container.setContentsMargins(10, 8, 10, 8)
@@ -415,9 +514,29 @@ class _EventCard(QFrame):
 
         self.setToolTip(_tooltip_text(layout_data.event))
 
+    def enterEvent(self, event) -> None:
+        del event
+        if self._hover_base_geometry is not None:
+            return
+        base = self.geometry()
+        self._hover_base_geometry = QRect(base)
+        expanded = QRect(base.x() - 4, max(0, base.y() - 6), base.width() + 8, base.height() + 12)
+        self.setGeometry(expanded)
+        self.raise_()
+
+    def leaveEvent(self, event) -> None:
+        del event
+        if self._hover_base_geometry is None:
+            return
+        self.setGeometry(self._hover_base_geometry)
+        self._hover_base_geometry = None
+
 
 class _ScheduledTodoCard(QFrame):
     clicked = Signal(str)
+    archiveRequested = Signal(str)
+    editLinkRequested = Signal(str)
+    openLinkRequested = Signal(str)
     dragStateChanged = Signal(bool)
     MIME_TYPE = "application/x-planner-scheduled-todo-key"
 
@@ -427,14 +546,20 @@ class _ScheduledTodoCard(QFrame):
         self._highlighted = False
         self._press_pos: QPoint | None = None
         self._drag_started = False
+        self._hover_base_geometry: QRect | None = None
+        self._category_base_color = category_color(block.category)
+        self._category_text_color = contrast_text_color(self._category_base_color)
         self._apply_style()
 
         title = QLabel(block.title, self)
         title.setWordWrap(True)
         title.setStyleSheet("font-size: 12px; font-weight: 700;")
+        title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         time_label = QLabel(f"{_format_minutes(block.start_minutes)} - {_format_minutes(block.end_minutes)}", self)
-        time_label.setStyleSheet("font-size: 10px; color: rgba(255, 255, 255, 0.88);")
+        time_color = "rgba(255, 255, 255, 0.88)" if self._category_text_color == "#ffffff" else "rgba(15, 23, 42, 0.80)"
+        time_label.setStyleSheet(f"font-size: 10px; color: {time_color};")
+        time_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         container = QVBoxLayout(self)
         container.setContentsMargins(10, 8, 10, 8)
@@ -489,23 +614,81 @@ class _ScheduledTodoCard(QFrame):
         self._drag_started = False
         super().mouseReleaseEvent(event)
 
+    def enterEvent(self, event) -> None:
+        del event
+        if self._hover_base_geometry is not None:
+            return
+        base = self.geometry()
+        self._hover_base_geometry = QRect(base)
+        expanded = QRect(base.x() - 4, max(0, base.y() - 6), base.width() + 8, base.height() + 12)
+        self.setGeometry(expanded)
+        self.raise_()
+
+    def leaveEvent(self, event) -> None:
+        del event
+        if self._hover_base_geometry is None:
+            return
+        self.setGeometry(self._hover_base_geometry)
+        self._hover_base_geometry = None
+
+    def contextMenuEvent(self, event) -> None:
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background: #f8fafc; color: #0f172a; border: 1px solid #cbd5e1; }"
+            "QMenu::item { padding: 6px 16px; }"
+            "QMenu::item:selected { background: #e2e8f0; color: #0f172a; }"
+        )
+        archive_action = menu.addAction("Done/Archive")
+        menu.addSeparator()
+        edit_action = menu.addAction("Edit Link")
+        open_action = menu.addAction("Open Link")
+        open_action.setEnabled(bool(self.block.link))
+
+        selected = menu.exec(event.globalPos())
+        if selected is archive_action:
+            self.archiveRequested.emit(self.block.todo_key)
+        if selected is edit_action:
+            self.editLinkRequested.emit(self.block.todo_key)
+        if selected is open_action:
+            self.openLinkRequested.emit(self.block.todo_key)
+
     def _apply_style(self) -> None:
-        border = "2px solid rgba(59, 130, 246, 0.95)" if self._highlighted else "1px solid rgba(51, 65, 85, 0.15)"
-        shadow = "rgba(30, 64, 175, 0.35)" if self._highlighted else "rgba(51, 65, 85, 0.18)"
+        if self._highlighted:
+            background = "rgba(59, 130, 246, 0.88)"
+            border = "1px solid rgba(37, 99, 235, 0.35)"
+            text_color = "#ffffff"
+        else:
+            background = self._category_base_color.name()
+            border = "1px solid rgba(15, 23, 42, 0.14)"
+            text_color = self._category_text_color
         self.setStyleSheet(
             "QFrame {"
-            "background: rgba(107, 114, 128, 0.82);"
+            f"background: {background};"
             "border-radius: 12px;"
             f"border: {border};"
-            f"box-shadow: 0 0 0 1px {shadow};"
             "}"
-            "QLabel { color: white; background: transparent; }"
+            f"QLabel {{ color: {text_color}; background: transparent; }}"
+            "QToolTip { background: #f8fafc; color: #0f172a; border: 1px solid #cbd5e1; padding: 6px; }"
         )
 
 
 def _event_color(seed: str) -> str:
     digest = hashlib.sha1(seed.encode("utf-8", errors="ignore")).digest()[0]
     return EVENT_PALETTE[digest % len(EVENT_PALETTE)]
+
+
+def _soft_event_color(color: str) -> str:
+    qcolor = QColor(color)
+    # Blend toward white to indicate non-blocking/optional entries.
+    red = min(255, int(qcolor.red() + (255 - qcolor.red()) * 0.58))
+    green = min(255, int(qcolor.green() + (255 - qcolor.green()) * 0.58))
+    blue = min(255, int(qcolor.blue() + (255 - qcolor.blue()) * 0.58))
+    return f"#{red:02x}{green:02x}{blue:02x}"
+
+
+def _is_soft_event(event) -> bool:
+    availability = str(getattr(event, "availability", "busy") or "busy").strip().lower()
+    return availability == "free"
 
 
 def _day_status(layout: WeekLayout, day_index: int):
@@ -537,6 +720,20 @@ def _today_day_index(layout: WeekLayout) -> int | None:
 def _is_today_column(layout: WeekLayout, day_index: int) -> bool:
     today_index = _today_day_index(layout)
     return today_index == day_index
+
+
+def _visible_day_indices(show_weekends: bool) -> tuple[int, ...]:
+    return tuple(range(7)) if show_weekends else tuple(range(5))
+
+
+def _day_column(day_index: int | None, show_weekends: bool) -> int | None:
+    if day_index is None:
+        return None
+    if show_weekends:
+        return day_index if 0 <= day_index < 7 else None
+    if 0 <= day_index < 5:
+        return day_index
+    return None
 
 
 def _tooltip_text(event) -> str:
